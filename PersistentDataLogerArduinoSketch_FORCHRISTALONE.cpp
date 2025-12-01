@@ -13,6 +13,8 @@
 #include <Preferences.h>
 #include <BlynkSimpleEsp32.h>
 #include <Arduino.h>
+#include <esp_system.h>
+
 
 #include <SoftwareSerial.h>
 #include "FS.h"
@@ -22,10 +24,18 @@
 #include "HTTPClient.h"
 #include "ArduinoJson.h"
 #include <WiFiClientSecure.h> 
+#include "DHT.h"
 #include "FS.h"
 #include "SD.h"
-#include "SPI.h"
-#include "DHT.h"
+#include "esp_wifi.h"
+
+
+// Graphics and font library
+#include <TFT_eSPI.h>
+#include <SPI.h>
+
+TFT_eSPI tft = TFT_eSPI();  // Invoke library
+
 
 #define BLYNK_PRINT Serial
 
@@ -56,8 +66,8 @@ DHT dht(DHTPin, DHTTYPE);
 
 // Mock sensor readings
 int current_ambient_light_intensity = 1267;
-float current_ambient_temperature = 1267;
-float current_ambient_relative_humidity = 1267;
+int current_ambient_temperature = 1267;
+int current_ambient_relative_humidity = 1267;
 int current_degree_of_rainfall = 1267;
 int current_air_quality_reading = 1267;
 
@@ -66,9 +76,12 @@ int current_air_quality_reading = 1267;
 String hotspotName = "";
 String hotspotPassword = "";
 bool shouldConnectToHotspot = false;   // Flag for non-blocking switch
+int noOfTimesOfHotspotConnection = 0;
 int currentNumOfStation = 0;
 bool AP_STA_SWITCH_SUCCESSFUL = false;
 bool shouldInteractWithBlynk = false;
+bool wifiScreenRendered = false;
+
 
 
 const char* GTLJC_host = "persistentdataloggersystem.pythonanywhere.com";
@@ -155,18 +168,9 @@ String interpret_air_quality(int sensor_value) {
   } 
 }
 
-int average_sensor_reading(int sensor_pin){
-  int average = 0;
-  for (int GTLJC_i = 0; GTLJC_i < 5; GTLJC_i++){
-    average += analogRead(sensor_pin);
-    delay(10);
-  }
-  average /= 5;
-  return average;
-}
 
 
-String handleSensorReadings(){
+void handleSensorReadings(){
 
   // Get raw sensor readings
   current_ambient_light_intensity = analogRead(Light_Intensity_SENSOR_PIN);
@@ -191,8 +195,8 @@ String handleSensorReadings(){
 
   String timestamp = "unavailable";
   String backend_data = stringified_temp + "," + stringified_hum + "," + intepreted_light_intensity_reading + "," + intepreted_degree_of_rainfall + "," + intepreted_air_quality_reading + "\n";
-
-  // Sending to backend
+  String local_data = stringified_temp + "," + stringified_hum + "," + intepreted_light_intensity_reading + "," + intepreted_degree_of_rainfall + "," + intepreted_air_quality_reading;
+  // // Sending to backend
     String GTLJC_backend_response = GTLJC_sendJsonBatch(backend_data, GTLJC_storage_route);
     String refined_response = GTLJC_backend_response.substring(GTLJC_backend_response.length() - 94, GTLJC_backend_response.length() - 35);
     // Get the timestamp of sent row if available
@@ -205,6 +209,10 @@ String handleSensorReadings(){
     }else{
       timestamp = timestamp;
     }
+    local_data += "," + timestamp + "\n";
+  
+
+    appendFile(SD, "/GTLJC_data.txt", local_data);
 
     GTLJC_backend_response = "";
     Serial.print("Refined Backend response: ");
@@ -212,60 +220,56 @@ String handleSensorReadings(){
     Serial.println("Graciously ends here.");
     Serial.print("Extracted timestamp: ");
     Serial.println(timestamp);
-    // Rendering on local display and saving on local storage
 
-  return "";
+    char str[12];
+    tft.setTextSize(2);
+    if (timestamp == "unavailable"){
+      timestamp = "Failed!";
+      sprintf(str, "%s", timestamp);
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.drawString(str,10, 90,2);
+    }
+    else {
+      timestamp = "Successful!";
+      sprintf(str, "%s", timestamp);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString(str,10, 90,2);
+    }
+
+  return ;
 }
 
 void SD_INITIALIZATION(){
-  if (!SD.begin()) {
-            Serial.println("Card Mount Failed");
-            // lcd.clear();
-            // lcd.setCursor(0,0);
-            // lcd.print("Card Mount Failed");
+  // Initialise the SD library before the TFT so the chip select is defined
+  SPI.begin(14, 2, 15, 13);
 
-            return;
-      }
-      uint8_t cardType = SD.cardType();
+  if (!SD.begin(13)) {
+    Serial.println("Card Mount Failed");
+    return;
+  }
 
-      if (cardType == CARD_NONE) {
-        Serial.println("No SD card attached");
-            // lcd.clear();
-            // lcd.setCursor(0,0);
-            // lcd.print("No SD card attached");
-        return;
-      }
+  Serial.println("✅ SD mounted successfully");
+  uint8_t cardType = SD.cardType();
 
-      Serial.print("SD Card Type: ");
-      if (cardType == CARD_MMC) {
-        Serial.println("MMC");
-        // lcd.clear();
-        // lcd.setCursor(0,0);
-        // lcd.print("MMC");
-      } else if (cardType == CARD_SD) {
-        Serial.println("SDSC");
-        // lcd.clear();
-        // lcd.setCursor(0,0);
-        // lcd.print("SDSC");
-      } else if (cardType == CARD_SDHC) {
-        Serial.println("SDHC");
-        // lcd.clear();
-        // lcd.setCursor(0,0);
-        // lcd.print("SDHC");
-      } else {
-        Serial.println("UNKNOWN");
-        // lcd.clear();
-        // lcd.setCursor(0,0);
-        // lcd.print("UNKNOWN");
-      }
+  if (cardType == CARD_NONE) {
+    Serial.println("No SD card attached");
+    return;
+  }
 
-      uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-      Serial.printf("SD Card Size: %lluMB\n", cardSize);
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC) {
+    Serial.println("MMC");
+  } else if (cardType == CARD_SD) {
+    Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC) {
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
 
-      // writeFile(SD, "/GTLJC_data.txt","batch,timestamp/colllection_interval,acc_x ,acc_y,acc_z,rot_x,rot_y ,rot_z,lat,long,GPS_speed_kmph,GPS_speed_mps,GPS_altitude_km,GPS_altitude_m,GPS_data_time,GPS_hdop_acc,GPS_n_of_satellite,anomaly,speed_level_on_encounter\n");
-      // readFile(SD, "/GTLJC_data.txt");
-      Serial.printf("Total space: %lluMB\n", SD.totalBytes() / (1024 * 1024));
-      Serial.printf("Used space: %lluMB\n", SD.usedBytes() / (1024 * 1024));
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+
 
 }
 
@@ -330,6 +334,7 @@ void sendReadingsToBlynk()
     Blynk.virtualWrite(V2, current_ambient_relative_humidity);
     Blynk.virtualWrite(V3, current_degree_of_rainfall );
     Blynk.virtualWrite(V4, current_air_quality_reading);
+    handleSensorReadings();
 }
 
 // ===================== HTML Page =====================
@@ -424,7 +429,7 @@ const char webpage[] PROGMEM = R"=====(
 
       <div class="input-group">
         <label>Hotspot Password</label>
-        <input type="password" id="hotspot_password" placeholder="Enter password">
+        <input type="text" id="hotspot_password" placeholder="Enter password">
       </div>
 
       <button onclick="sendDataToEsp32()">Send Credentials</button>
@@ -452,6 +457,7 @@ const char webpage[] PROGMEM = R"=====(
         xhttp.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
         xhttp.send("value=" + encodeURIComponent(value));
       }
+
     </script>
 
   </body>
@@ -464,6 +470,16 @@ void connectToProvidedHotspot() {
   if (hotspotName.isEmpty() || hotspotPassword.isEmpty()) return;
 
   Serial.println("== Switching from AP to STA Mode ==");
+  // >>> TFT DISPLAY (ADDED)
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 20);
+  tft.println("Connecting to: ");
+  tft.setTextSize(2);
+  tft.setCursor(10, 45);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.println(hotspotName);
 
   // Stop the server before mode switch
   server.end();
@@ -477,6 +493,7 @@ void connectToProvidedHotspot() {
   WiFi.mode(WIFI_STA);
   delay(300);
 
+
   // Begin connection
   Serial.printf("Connecting to hotspot: %s\n", hotspotName.c_str());
   WiFi.begin(hotspotName.c_str(), hotspotPassword.c_str());
@@ -488,7 +505,7 @@ void connectToProvidedHotspot() {
     // && millis() - startAttempt < timeout
     Serial.print(".");
     delay(100);
-    // yield();  // Allow other tasks and AsyncWebServer to run
+    yield();  // Allow other tasks and AsyncWebServer to run
   }
   Serial.println();
 
@@ -498,6 +515,53 @@ void connectToProvidedHotspot() {
     AP_STA_SWITCH_SUCCESSFUL = true; // A check verifying a fulfilled switch from WIFI_AP to WIFI_STA
     Blynk.begin(auth, hotspotName.c_str(), hotspotPassword.c_str());
     timer.setInterval(100L, sendReadingsToBlynk);
+    if (!wifiScreenRendered) {
+        Serial.println("wifi screen graciously rendering");
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.setTextSize(2);
+        tft.setCursor(10, 20);
+        tft.println("Hotspot Connected :");
+        
+
+        tft.setTextSize(2);
+        tft.setCursor(10, 50);
+        tft.println(hotspotName.c_str());
+
+        wifiScreenRendered = true;
+        delay(3000);
+
+        tft.fillScreen(TFT_BLACK);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+
+        // Set text datum to middle centre
+        tft.setTextDatum(MC_DATUM);
+
+        tft.setCursor(10, 20);
+        tft.println("      NOW UPLOADING");
+
+        tft.setCursor(10, 60);
+        tft.println("          TO");
+
+        tft.setCursor(10, 90);
+        tft.println("       BACKEND");
+
+        tft.setCursor(10, 120 );
+        tft.println("         ...");
+
+        tft.setCursor(10, 140 );
+        tft.println("     View data on");
+
+        tft.setCursor(10, 160 );
+        tft.println("   Mobile and Web App");
+
+
+        // tft.fillScreen(TFT_BLACK);
+
+        
+
+    }
 
 
     // Save credentials
@@ -511,6 +575,17 @@ void connectToProvidedHotspot() {
   }
   else {
     Serial.println("Connection failed, reverting to AP mode.");
+    wifiScreenRendered = false;
+
+    // >>> TFT DISPLAY (ADDED)
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 20);
+    tft.println("WiFi Failed");
+    tft.setTextSize(1);
+    tft.setCursor(10, 45);
+    tft.println("Reverting to AP");
     WiFi.mode(WIFI_AP);
     delay(300);
     WiFi.softAP(apSSID, apPass);
@@ -524,7 +599,47 @@ void connectToProvidedHotspot() {
 void setup() {
   Serial.begin(115200);
   dht.begin();
-  SD_INITIALIZATION();
+  // Initialise the TFT after the SD card!
+  tft.init();
+  tft.setRotation(3);
+  tft.fillScreen(TFT_BLACK);
+  // // tft.fillScreen(TFT_ORANGE);
+   // >>> TFT DISPLAY (ADDED)
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 50);
+  tft.println("  Persistent Data Logger");
+  delay(5000);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("System Booting...");
+  delay(2000);
+  // SD_INITIALIZATION();
+  SPI.begin(14, 2, 15, 13);
+  // >>> TFT DISPLAY (ADDED)
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(10, 55);
+  tft.println("Initializing SD...");
+  delay(2000);
+  if (!SD.begin(13)) {
+    Serial.println("Card Mount Failed");
+    // >>> TFT DISPLAY (ADDED)
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.setCursor(10, 95);
+    tft.println("SD Card FAILED");
+    tft.setCursor(10, 125);
+    tft.println("Restarting...");
+    delay(5000);
+    esp_restart();
+    return;
+  }
+
+  // >>> TFT DISPLAY (ADDED)
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setCursor(10, 75);
+  tft.println("SD Card OK");
+  Serial.println("✅ SD mounted successfully");
 
   // Load stored credentials if available
   preferences.begin("wifi", true);
@@ -535,8 +650,20 @@ void setup() {
   // Setup AP
   WiFi.softAPConfig(ip, gateway, subnet);
   WiFi.softAP(apSSID, apPass);
+  
 
   Serial.printf("AP running. IP: %s\n", WiFi.softAPIP().toString().c_str());
+  // >>> TFT DISPLAY (ADDED)
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setCursor(10, 95);
+  tft.println("Provide Hotspot Creds:");
+  tft.setCursor(10, 115);
+  tft.print("Open Browser and Type");
+  tft.println("");
+  tft.setCursor(10, 135);
+  tft.print(WiFi.softAPIP());
+  tft.println(":80");
+ 
 
   // Setup AsyncWebServer routes
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -565,6 +692,8 @@ void setup() {
 
 }
 
+
+
 // ===================== Main Loop =====================
 void loop() {
   // Print connected stations count
@@ -574,20 +703,18 @@ void loop() {
     Serial.printf("Stations connected to AP: %d\n", currentNumOfStation);
   }
 
-  // Check if we should switch to STA
+  // // Check if we should switch to STA
   if (shouldConnectToHotspot) {
     shouldConnectToHotspot = false;
+    Serial.println("hotSpot connection re-initiated.");
     connectToProvidedHotspot();  // safe call outside server task
   }
 
   if (AP_STA_SWITCH_SUCCESSFUL){
     Blynk.run();
     timer.run();
-    // Mock sensor readings
-    handleSensorReadings();
-    delay(5000);
+        
   }
 
 }
-
 
